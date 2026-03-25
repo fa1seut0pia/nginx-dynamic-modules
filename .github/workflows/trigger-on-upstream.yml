@@ -1,0 +1,44 @@
+name: trigger-on-upstream
+
+on:
+  schedule:
+    - cron: "15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve latest docker-published nginx release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          upstream_release="$(./scripts/resolve-nginx-release.sh latest-docker-published)"
+          echo "upstream_release=$upstream_release"
+          if gh release view "$upstream_release" >/dev/null 2>&1; then
+            echo "new_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_release=true" >> "$GITHUB_OUTPUT"
+            echo "release_tag=$upstream_release" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger module release workflow
+        id: dispatch
+        if: steps.check.outputs.new_release == 'true'
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc --arg rel "${{ steps.check.outputs.release_tag }}" '{event_type:"nginx-release",client_payload:{release:$rel}}')"
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -d "$payload" \
+            "https://api.github.com/repos/${{ github.repository }}/dispatches"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
