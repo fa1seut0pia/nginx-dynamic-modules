@@ -1,0 +1,73 @@
+name: trigger-on-upstream
+
+on:
+  schedule:
+    - cron: "15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check latest nginx release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          upstream_release="$(
+            curl -fsSL --retry 3 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/nginx/nginx/releases?per_page=10" \
+            | jq -r '[.[] | select(.draft == false and .prerelease == false) | .tag_name | select(startswith("release-")) | sub("^release-"; "")] | .[]' \
+            | sort -V \
+            | tail -n1 \
+            | sed 's/^/release-/'
+          )"
+          last_processed=""
+          if [ -f .last_nginx_release ]; then
+            last_processed="$(cat .last_nginx_release)"
+          fi
+          echo "upstream_release=$upstream_release"
+          echo "last_processed=$last_processed"
+          if [ "$upstream_release" != "null" ] && [ -n "$upstream_release" ] && [ "$upstream_release" != "$last_processed" ]; then
+            echo "new_release=true" >> "$GITHUB_OUTPUT"
+            echo "release_tag=$upstream_release" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger module release workflow
+        id: dispatch
+        if: steps.check.outputs.new_release == 'true'
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc --arg rel "${{ steps.check.outputs.release_tag }}" '{event_type:"nginx-release",client_payload:{release:$rel}}')"
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -d "$payload" \
+            "https://api.github.com/repos/${{ github.repository }}/dispatches"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Persist processed release
+        if: steps.check.outputs.new_release == 'true' && steps.dispatch.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          echo "${{ steps.check.outputs.release_tag }}" > .last_nginx_release
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f .last_nginx_release
+          if git diff --cached --quiet; then
+            echo "No change."
+            exit 0
+          fi
+          git commit -m "chore: record nginx release ${{ steps.check.outputs.release_tag }}"
+          git push

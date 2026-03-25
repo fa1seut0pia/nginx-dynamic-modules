@@ -1,0 +1,17 @@
+[
+  {
+    "name": "rtmp",
+    "repo": "https://github.com/arut/nginx-rtmp-module.git",
+    "ref": ""
+  },
+  {
+    "name": "vts",
+    "repo": "https://github.com/vozlt/nginx-module-vts.git",
+    "ref": ""
+  },
+  {
+    "name": "ip2region",
+    "repo": "https://github.com/lionsoul2014/ip2region.git",
+    "ref": ""
+  }
+]

@@ -1,0 +1,118 @@
+name: release-modules
+
+on:
+  repository_dispatch:
+    types:
+      - nginx-release
+  workflow_dispatch:
+    inputs:
+      nginx_version:
+        description: "Override nginx version, e.g. 1.29.6"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve nginx version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_NGINX_VERSION: ${{ github.event.inputs.nginx_version }}
+        run: |
+          set -euo pipefail
+          nginx_version=""
+
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            nginx_version="${{ github.event.client_payload.release }}"
+          fi
+
+          if [ -z "$nginx_version" ] || [ "$nginx_version" = "null" ]; then
+            nginx_version="${INPUT_NGINX_VERSION:-}"
+          fi
+
+          nginx_version="$(echo "$nginx_version" | tr -d '[:space:]')"
+
+          if [ -z "$nginx_version" ] || [ "$nginx_version" = "null" ]; then
+            nginx_version="$(
+              curl -fsSL --retry 3 \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                "https://api.github.com/repos/nginx/nginx/releases?per_page=10" \
+              | jq -r '[.[] | select(.draft == false and .prerelease == false) | .tag_name | select(startswith("release-")) | sub("^release-"; "")] | .[]' \
+              | sort -V \
+              | tail -n1
+            )"
+          fi
+
+          if [ -z "$nginx_version" ] || [ "$nginx_version" = "null" ]; then
+            echo "failed to resolve nginx release tag" >&2
+            exit 1
+          fi
+
+          if [[ "$nginx_version" != release-* ]]; then
+            nginx_version="release-$nginx_version"
+          fi
+
+          release_tag="$nginx_version"
+          nginx_version="${nginx_version#release-}"
+          echo "nginx_version=$nginx_version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if release exists
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${{ steps.resolve.outputs.release_tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build all modules
+        if: steps.exists.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          ./scripts/export-modules.sh "${{ steps.resolve.outputs.nginx_version }}" "${GITHUB_WORKSPACE}/dist/${{ steps.resolve.outputs.nginx_version }}"
+
+      - name: Validate release files
+        if: steps.exists.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/${{ steps.resolve.outputs.nginx_version }}/*/*.so)
+          if [ "${#files[@]}" -ne 3 ]; then
+            echo "expected 3 module files, got ${#files[@]}" >&2
+            ls -R dist || true
+            exit 1
+          fi
+          ls -lh "${files[@]}"
+
+      - name: Create release
+        if: steps.exists.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve.outputs.release_tag }}
+          name: ${{ steps.resolve.outputs.release_tag }}
+          body: |
+            Dynamic modules built for nginx ${{ steps.resolve.outputs.nginx_version }}:
+            - ngx_rtmp_module.so
+            - ngx_http_vhost_traffic_status_module.so
+            - ngx_http_ip2region_module.so
+          files: |
+            dist/${{ steps.resolve.outputs.nginx_version }}/rtmp/*.so
+            dist/${{ steps.resolve.outputs.nginx_version }}/vts/*.so
+            dist/${{ steps.resolve.outputs.nginx_version }}/ip2region/*.so
+          fail_on_unmatched_files: true
